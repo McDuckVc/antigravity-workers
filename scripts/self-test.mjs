@@ -28,6 +28,7 @@ const child = spawn(process.execPath, [server], {
     ANTIGRAVITY_ACCOUNT_FILE: accountFile,
     ANTIGRAVITY_MOCK_FAIL_ONCE_FILE: failOnceFile,
     ANTIGRAVITY_BRAIN_DIR: brainDirectory,
+    ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES: "1024",
   },
   stdio: ["pipe", "pipe", "inherit"],
   windowsHide: true,
@@ -128,8 +129,23 @@ try {
   assert.equal(retryCompleted.structuredContent.status, "succeeded", retryCompleted.content?.[0]?.text);
   assert.equal(retryCompleted.structuredContent.attempt, 2);
   assert(retryCompleted.structuredContent.events.some((event) => event.type === "retrying"));
+  const cappedStarted = await request("tools/call", {
+    name: "start_analysis",
+    arguments: { cwd: here, task: "STREAM_CAP_TEST return the final result after oversized progress.", max_retries: 0 },
+  });
+  const cappedCompleted = await request("tools/call", {
+    name: "get_run",
+    arguments: { run_id: cappedStarted.structuredContent.id, wait_ms: 5000 },
+  });
+  assert.equal(cappedCompleted.structuredContent.status, "succeeded", cappedCompleted.content?.[0]?.text);
+  assert.match(cappedCompleted.structuredContent.response, /MOCK_OK/);
+  await fs.writeFile(path.join(state, "runs", `${runId}.attempt-1.terminal.json`), JSON.stringify({ run_id: runId, status: "succeeded" }), "utf8");
   const recent = await request("tools/call", { name: "list_runs", arguments: { limit: 5 } });
-  assert.equal(recent.structuredContent.count, 3);
+  assert.equal(recent.structuredContent.count, 4);
+  assert(recent.structuredContent.runs.every((run) => run.id && run.kind));
+  const projectRuns = await request("tools/call", { name: "list_runs", arguments: { cwd: here, limit: 5 } });
+  assert.equal(projectRuns.isError, false, projectRuns.content?.[0]?.text);
+  assert.equal(projectRuns.structuredContent.count, 4);
 
   const mediaStarted = await request("tools/call", {
     name: "start_media_analysis",
@@ -224,6 +240,24 @@ try {
   });
   assert.equal(applied.isError, false, applied.content?.[0]?.text);
   assert.equal((await fs.readFile(path.join(repository, "antigravity-worker-test.txt"), "utf8")).trim(), "isolated worker output");
+  const deniedEditStarted = await request("tools/call", {
+    name: "start_edit",
+    arguments: {
+      cwd: repository,
+      task: "DENY_EDIT_TEST",
+      acceptance_criteria: "Exercise a denied edit that produces no patch.",
+    },
+  });
+  assert.equal(deniedEditStarted.isError, false, deniedEditStarted.content?.[0]?.text);
+  const deniedEditCompleted = await request("tools/call", {
+    name: "get_run",
+    arguments: { run_id: deniedEditStarted.structuredContent.id, wait_ms: 5000 },
+  });
+  assert.equal(deniedEditCompleted.structuredContent.status, "failed");
+  assert.equal(deniedEditCompleted.structuredContent.patch.empty, true);
+  assert.match(deniedEditCompleted.structuredContent.error, /produced no code changes/i);
+  assert.match(deniedEditCompleted.structuredContent.error, /RunCommand/);
+  assert.equal(deniedEditCompleted.structuredContent.events.filter((event) => event.type === "started").length, 1);
   process.stdout.write("MCP transport, queueing, multimodal analysis, native image artifacts, multi-agent review, messaging, dashboard, isolated edit, and patch application: OK\n");
 } finally {
   child.kill();

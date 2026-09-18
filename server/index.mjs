@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { openRuntime } from "./runtime-owner.mjs";
+import { launchWorkerTerminal, workerTerminalConfig } from "./worker-terminal.mjs";
 
 const VERSION = "0.3.0";
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -21,6 +23,7 @@ const defaultStateRoot = process.platform === "win32"
   : path.join(os.homedir(), ".codex", "antigravity-workers");
 const stateRoot = path.resolve(process.env.ANTIGRAVITY_STATE_DIR || defaultStateRoot);
 const runsRoot = path.join(stateRoot, "runs");
+const terminalsRoot = path.join(stateRoot, "terminals");
 const slotsRoot = path.join(stateRoot, "slots");
 const worktreesRoot = path.join(stateRoot, "worktrees");
 const teamsRoot = path.join(stateRoot, "teams");
@@ -45,9 +48,12 @@ const maxTeamAgents = clampInt(process.env.ANTIGRAVITY_MAX_TEAM_AGENTS, 1, 64, 3
 const defaultModel = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.1-pro-high";
 const balancedModel = process.env.ANTIGRAVITY_BALANCED_MODEL || "gemini-3.8-flash-medium";
 const fastModel = process.env.ANTIGRAVITY_FAST_MODEL || "gemini-3.8-flash-low";
+const terminalConfig = workerTerminalConfig();
+const maxBufferedStdoutBytes = clampInt(process.env.ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES, 1024, 32 * 1024 * 1024, 32 * 1024 * 1024);
 
 await Promise.all([
   fs.mkdir(runsRoot, { recursive: true }),
+  fs.mkdir(terminalsRoot, { recursive: true }),
   fs.mkdir(slotsRoot, { recursive: true }),
   fs.mkdir(worktreesRoot, { recursive: true }),
   fs.mkdir(teamsRoot, { recursive: true }),
@@ -268,6 +274,14 @@ async function captureGeneratedArtifacts(run) {
 function runPath(runId) {
   if (!/^[A-Za-z0-9-]+$/.test(runId)) throw new Error("Invalid run_id.");
   return path.join(runsRoot, `${runId}.json`);
+}
+
+function isRunRecordFilename(name) {
+  return /^[A-Za-z0-9-]+\.json$/.test(name);
+}
+
+async function listRunRecordFiles() {
+  return (await fs.readdir(runsRoot)).filter(isRunRecordFilename);
 }
 
 async function serializedAtomicWrite(chains, key, target, contents) {
@@ -510,6 +524,29 @@ function runCommand(command, args, { cwd, input, env, allowFailure = false, maxB
   });
 }
 
+function endWritable(stream) {
+  return new Promise(resolve => {
+    if (stream.closed || stream.destroyed) return resolve();
+    stream.once("error", resolve);
+    stream.end(resolve);
+  });
+}
+
+async function completeWorkerTerminal(run) {
+  if (!run.terminal?.completion_path) return;
+  const completion = {
+    run_id: run.id,
+    attempt: run.attempt,
+    status: run.status,
+    exit_code: run.exit_code,
+    signal: run.signal,
+    finished_at: run.finished_at,
+    message: run.error,
+  };
+  await fs.writeFile(run.terminal.completion_path, `${JSON.stringify(completion)}\n`, { flag: "wx" }).catch(() => {});
+  run.terminal.status = "completed";
+}
+
 async function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options });
 }
@@ -596,14 +633,46 @@ function parseAgyOutput(buffer) {
   const text = buffer.toString("utf8").trim();
   if (!text) throw new Error("Antigravity returned no JSON output.");
   try {
-    return JSON.parse(text);
+    const payload = JSON.parse(text);
+    return payload?.event === "result" && payload.result ? payload.result : payload;
   } catch {
     const lines = text.split(/\r?\n/).filter(Boolean);
+    const parsed = [];
     for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try { return JSON.parse(lines[index]); } catch {}
+      try { parsed.push(JSON.parse(lines[index])); } catch {}
     }
+    const resultEvent = parsed.find(payload => payload?.event === "result" && payload.result);
+    if (resultEvent) return resultEvent.result;
+    const legacyPayload = parsed.find(payload => payload && typeof payload === "object" && !payload.event);
+    if (legacyPayload) return legacyPayload;
     throw new Error(`Antigravity returned invalid JSON: ${text.slice(0, 500)}`);
   }
+}
+
+function streamResultCollector() {
+  return { decoder: new StringDecoder("utf8"), lineBuffer: "", result: null };
+}
+
+function collectStreamResults(state, chunk, flush = false) {
+  state.lineBuffer += chunk ? state.decoder.write(chunk) : "";
+  if (flush) state.lineBuffer += state.decoder.end();
+  const lines = state.lineBuffer.split(/\r?\n/);
+  state.lineBuffer = flush ? "" : lines.pop() || "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const payload = JSON.parse(line);
+      if (payload?.event === "result" && payload.result) state.result = payload.result;
+    } catch {}
+  }
+}
+
+function deniedActionSummary(actions) {
+  const entries = Array.isArray(actions) ? actions : actions ? [actions] : [];
+  const names = entries
+    .map((entry) => typeof entry === "string" ? entry : entry?.display_name || entry?.action)
+    .filter(Boolean);
+  return names.length ? ` Required actions were denied: ${[...new Set(names)].join(", ")}.` : "";
 }
 
 function publicRun(run, { includePrompt = false } = {}) {
@@ -704,7 +773,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     "-p", run.prompt,
     "--model", run.model,
     "--effort", run.effort,
-    "--output-format", "json",
+    "--output-format", "stream-json",
     "--mode", run.worker_mode,
     "--add-dir", run.worker_cwd,
     "--print-timeout", `${run.timeout_minutes}m`,
@@ -713,17 +782,19 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 
   const stdoutPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stdout.log`);
   const stderrPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stderr.log`);
+  const completionPath = path.join(terminalsRoot, `${run.id}.attempt-${run.attempt}.json`);
   run.logs = { stdout: stdoutPath, stderr: stderrPath };
   const stdoutStream = createWriteStream(stdoutPath, { flags: "w" });
   const stderrStream = createWriteStream(stderrPath, { flags: "w" });
   const stdoutChunks = [];
   let stdoutBytes = 0;
+  const resultCollector = streamResultCollector();
 
   let child;
   try {
     child = spawn(agy, args, {
       cwd: run.worker_cwd,
-      env: { ...process.env, NO_COLOR: "1" },
+      env: { ...process.env, NO_COLOR: "1", AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -738,12 +809,30 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 
   children.set(run.id, child);
   run.pid = child.pid;
+  if (terminalConfig.enabled) {
+    try {
+      run.terminal = launchWorkerTerminal({
+        run,
+        stdoutPath,
+        stderrPath,
+        completionPath,
+        teamPath: run.team_id ? teamPath(run.team_id) : null,
+        config: terminalConfig,
+      });
+      addRunEvent(run, "terminal_opened", { mode: "cmd", attempt: run.attempt });
+    } catch (error) {
+      run.terminal = { mode: "cmd", status: "launch-failed", error: error.message };
+      addRunEvent(run, "terminal_launch_failed", { error: error.message, attempt: run.attempt });
+    }
+  }
   child.stdout.on("data", (chunk) => {
     stdoutStream.write(chunk);
+    collectStreamResults(resultCollector, chunk);
+    const remaining = maxBufferedStdoutBytes - stdoutBytes;
+    if (remaining > 0) stdoutChunks.push(chunk.subarray(0, remaining));
     stdoutBytes += chunk.length;
-    if (stdoutBytes <= 32 * 1024 * 1024) stdoutChunks.push(chunk);
   });
-  child.stderr.pipe(stderrStream);
+  child.stderr.on("data", (chunk) => { stderrStream.write(chunk); });
 
   let finishPersistence;
   const launchPersisted = new Promise(resolve => { finishPersistence = resolve; });
@@ -753,14 +842,15 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     await launchPersisted;
     const persisted = await readRecord(runPath(run.id));
     if (persisted?.cancellation_requested) run.cancellation_requested = persisted.cancellation_requested;
-    stdoutStream.end();
-    stderrStream.end();
+    await Promise.all([endWritable(stdoutStream), endWritable(stderrStream)]);
     children.delete(run.id);
     run.exit_code = code;
     run.signal = signal;
     run.finished_at = isoNow();
+    let editResultInvalid = false;
     try {
-      const payload = parseAgyOutput(Buffer.concat(stdoutChunks));
+      collectStreamResults(resultCollector, null, true);
+      const payload = resultCollector.result || parseAgyOutput(Buffer.concat(stdoutChunks));
       run.conversation_id = payload.conversation_id || run.conversation_id;
       run.response = payload.response ?? payload.result ?? payload;
       run.usage = payload.usage;
@@ -788,7 +878,23 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
       run.status = run.cancellation_requested ? "cancelled" : "failed";
       run.error = error.message;
     }
-    const shouldRetry = run.status === "failed" && !run.cancellation_requested && run.attempt <= (run.max_retries || 0);
+    if (run.kind === "edit") {
+      delete run.patch_error;
+      await capturePatch(run).catch((error) => {
+        run.patch_error = error.message;
+      });
+      if (run.status === "succeeded" && run.patch_error) {
+        run.status = "failed";
+        run.error = `Antigravity reported success but its patch could not be captured: ${run.patch_error}`;
+        editResultInvalid = true;
+      } else if (run.status === "succeeded" && (!run.patch || run.patch.empty)) {
+        run.status = "failed";
+        run.error = `Antigravity reported success but produced no code changes.${deniedActionSummary(run.denied_actions)}`;
+        editResultInvalid = true;
+      }
+    }
+    await completeWorkerTerminal(run);
+    const shouldRetry = run.status === "failed" && !editResultInvalid && !run.cancellation_requested && run.attempt <= (run.max_retries || 0);
     if (shouldRetry) {
       addRunEvent(run, "retrying", { attempt: run.attempt + 1, error: run.error });
       delete run.pid;
@@ -801,11 +907,6 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
       return;
     }
     addRunEvent(run, run.status, { exit_code: code, duration_seconds: run.duration_seconds });
-    if (run.kind === "edit") {
-      await capturePatch(run).catch((error) => {
-        run.patch_error = error.message;
-      });
-    }
     await releaseSlot(slot);
     await writeRun(run).catch(() => {});
     await pumpQueue().catch(() => {});
@@ -821,8 +922,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 }
 
 async function conversationBusy(conversationId, except) {
-  for (const file of await fs.readdir(runsRoot)) {
-    if (!file.endsWith(".json")) continue;
+  for (const file of await listRunRecordFiles()) {
     const run = await readRecord(path.join(runsRoot, file));
     if (run?.id !== except && run?.status === "running" && (run.resume_conversation_id || run.conversation_id) === conversationId) {
       if ((await readRun(run.id)).status === "running") return true;
@@ -1019,7 +1119,7 @@ async function getRun(input) {
 async function listRuns(input) {
   const limit = clampInt(input.limit, 1, 100, 20);
   const cwd = input.cwd ? path.resolve(input.cwd) : null;
-  const files = (await fs.readdir(runsRoot)).filter((name) => name.endsWith(".json"));
+  const files = await listRunRecordFiles();
   const runs = [];
   for (const file of files) {
     const run = await fs.readFile(path.join(runsRoot, file), "utf8").then(JSON.parse).catch(() => null);
@@ -1472,8 +1572,7 @@ async function cancelTeam(input) {
 
 async function cancelTeamChildren(teamId) {
   // Include children not yet linked by a driver write and peer continuations.
-  for (const file of await fs.readdir(runsRoot)) {
-    if (!file.endsWith(".json")) continue;
+  for (const file of await listRunRecordFiles()) {
     const run = await readRecord(path.join(runsRoot, file));
     if (run?.team_id === teamId && !TERMINAL.has(run.status)) await cancelRun({ run_id: run.id });
   }
@@ -1564,6 +1663,7 @@ async function doctor() {
     detected_parallelism: detectedParallelism,
     scheduler_pid: process.pid,
     scheduler_mode: "single-owner-ipc",
+    worker_terminals: terminalConfig,
     queued_runs: queuedLaunches.size,
     active_runs: children.size,
     agy_path: agy,
@@ -1572,7 +1672,7 @@ async function doctor() {
     default_model: defaultModel,
     balanced_model: balancedModel,
     fast_model: fastModel,
-    capabilities: ["queued-runs", "multi-agent-teams", "peer-messaging", "coordinator-review", "correction-rounds", "retries", "live-events", "isolated-edits", "native-image-generation", "native-image-editing", "multimodal-analysis", "artifact-ledger"],
+    capabilities: ["queued-runs", "multi-agent-teams", "peer-messaging", "coordinator-review", "correction-rounds", "retries", "live-events", "windows-worker-terminals", "isolated-edits", "native-image-generation", "native-image-editing", "multimodal-analysis", "artifact-ledger"],
     media_limits: { max_file_bytes: maxMediaFileBytes, max_total_bytes: maxMediaTotalBytes, max_inline_artifact_bytes: maxInlineArtifactBytes },
     safety: "Team workers are read-only. Edit workers use isolated Git worktrees. Media inputs are copied into per-run Git workspaces so Antigravity sees only explicitly supplied files; applying code patches remains a separate Codex-controlled action.",
   };
@@ -1936,7 +2036,7 @@ async function handle(message) {
 }
 
 async function restoreOperationalState() {
-  const runFiles = (await fs.readdir(runsRoot)).filter((name) => name.endsWith(".json"));
+  const runFiles = await listRunRecordFiles();
   for (const file of runFiles) {
     const run = await fs.readFile(path.join(runsRoot, file), "utf8").then(JSON.parse).catch(() => null);
     if (!run || run.status !== "queued" || run.cancellation_requested) continue;

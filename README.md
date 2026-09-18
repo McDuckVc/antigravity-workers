@@ -12,6 +12,7 @@ Delegate bounded code analysis, review, isolated edits, multimodal research, and
 - Explicitly scoped media inputs copied into per-run workspaces; native image generation and editing.
 - Persistent run and team ledgers, cancellation, continuation, and recovery after interruption.
 - One scheduler per state directory, shared across multiple MCP clients.
+- Optional per-worker live Command Prompt windows on Windows.
 - No npm runtime dependencies.
 
 ## Requirements
@@ -50,6 +51,20 @@ Restart your Codex session after registering the server. Ask it to run `doctor` 
 
 > Use Antigravity Workers to review the parser in this repository. Report issues with file references. Do not modify files.
 
+### Live worker Command Prompt windows (Windows)
+
+Set `ANTIGRAVITY_WORKER_TERMINALS=on` in the MCP server environment to open one read-only Command Prompt window for each running worker, including team members, coordinators, continuations, and retry attempts. Each viewer renders Antigravity's structured response deltas, tool and subagent activity, and incoming coordinator or peer messages as they arrive. Completed windows use a black-and-green `color 0A` theme with a framed agent-information header, the response text, and a separate run-metadata frame containing status, token usage, duration, and identifiers. Team windows continue to receive relevant messages after their worker finishes, and the scheduler continues to parse and persist the original streams normally.
+
+Closing a viewer window does not cancel its worker. Use `cancel_run` or `cancel_team` for cancellation. After the response and metadata are displayed, completed viewers start a two-minute auto-close timer. Press any key during that timer to cancel it and keep the window open until you close it; relevant team messages continue streaming while it remains open. The feature is Windows-only and opt-in so headless sessions, CI, and automations do not open desktop windows.
+
+For a direct MCP registration, add the environment variable when registering the server:
+
+```sh
+codex mcp add antigravity-workers --env ANTIGRAVITY_WORKER_TERMINALS=on -- node "C:\absolute\path\antigravity-workers\server\index.mjs"
+```
+
+Run `doctor` after restarting Codex and check `worker_terminals.enabled` to confirm the setting reached the scheduler owner.
+
 For the orchestration guidance, copy `skills/antigravity-orchestrator` to your personal Codex skills directory (`~/.codex/skills/`) or use this repository as a plugin through your configured marketplace. Direct MCP registration installs the tools; adding the skill supplies the workflow instructions.
 
 ### Plugin packaging
@@ -81,6 +96,7 @@ Set these variables in the MCP client's server environment:
 | `ANTIGRAVITY_DEFAULT_MODEL` | `gemini-3.1-pro-high` |
 | `ANTIGRAVITY_BALANCED_MODEL` | `gemini-3.8-flash-medium` |
 | `ANTIGRAVITY_FAST_MODEL` | `gemini-3.8-flash-low` |
+| `ANTIGRAVITY_WORKER_TERMINALS` | `off`; set to `on` on Windows to open a formatted Command Prompt result viewer for every running worker. |
 | `ANTIGRAVITY_MAX_MEDIA_FILE_MB` | 250 MB per input file. |
 | `ANTIGRAVITY_MAX_MEDIA_TOTAL_MB` | 1024 MB across a request's inputs. |
 | `ANTIGRAVITY_MAX_INLINE_ARTIFACT_MB` | 12 MB for inline artifacts. |
@@ -94,7 +110,7 @@ This is a local orchestration tool, not a security sandbox. Workers run with the
 
 The state directory can contain prompts, responses, logs, worktrees, artifacts, and local runtime authentication material. Keep it outside public repositories. `get_account` returns the active account identifier only when explicitly requested; it does not expose OAuth tokens.
 
-Edit workers require a Git repository. Inspect the patch and relevant tests before calling `apply_run`; read-only teams never apply edits. See [SECURITY.md](SECURITY.md).
+Edit workers require a Git repository. A CLI success result is accepted only when patch capture also produces code changes; denied actions or an empty patch are reported as a failed run and are not automatically retried. Inspect the patch and relevant tests before calling `apply_run`; read-only teams never apply edits. See [SECURITY.md](SECURITY.md).
 
 ## Development and validation
 

@@ -10,7 +10,7 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node server/index.mjs",
-    "test": "node scripts/self-test.mjs && node scripts/runtime-regression-test.mjs",
+    "test": "node scripts/worker-terminal-test.mjs && node scripts/self-test.mjs && node scripts/runtime-regression-test.mjs",
     "test:runtime": "node scripts/runtime-regression-test.mjs",
     "test:live": "node scripts/smoke-real.mjs"
   }
