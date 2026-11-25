@@ -9,9 +9,9 @@
       "env": {
         "ANTIGRAVITY_MAX_WORKERS": "auto",
         "ANTIGRAVITY_MAX_TEAM_AGENTS": "64",
-        "ANTIGRAVITY_DEFAULT_MODEL": "gemini-3.1-pro-high",
-        "ANTIGRAVITY_BALANCED_MODEL": "gemini-3.8-flash-medium",
-        "ANTIGRAVITY_FAST_MODEL": "gemini-3.8-flash-low",
+        "ANTIGRAVITY_DEFAULT_MODEL": "gemini-4-carbon-high",
+        "ANTIGRAVITY_BALANCED_MODEL": "gemini-4-hydrogen-medium",
+        "ANTIGRAVITY_FAST_MODEL": "gemini-4-hydrogen-low",
         "ANTIGRAVITY_MAX_MEDIA_FILE_MB": "250",
         "ANTIGRAVITY_MAX_MEDIA_TOTAL_MB": "1024",
         "ANTIGRAVITY_MAX_INLINE_ARTIFACT_MB": "12"

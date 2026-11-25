@@ -93,10 +93,11 @@ Set these variables in the MCP client's server environment:
 | `ANTIGRAVITY_STATE_DIR` | Windows: `%LOCALAPPDATA%/CodexAntigravityWorkers`; other platforms: `~/.codex/antigravity-workers`. |
 | `ANTIGRAVITY_MAX_WORKERS` | `auto`; derived from CPU and memory, capped at 16. Explicit values: 1–32. |
 | `ANTIGRAVITY_MAX_TEAM_AGENTS` | Server default 32; bundled plugin configuration 64. |
-| `ANTIGRAVITY_DEFAULT_MODEL` | `gemini-3.1-pro-high` |
-| `ANTIGRAVITY_BALANCED_MODEL` | `gemini-3.8-flash-medium` |
-| `ANTIGRAVITY_FAST_MODEL` | `gemini-3.8-flash-low` |
+| `ANTIGRAVITY_DEFAULT_MODEL` | `gemini-4-carbon-high` |
+| `ANTIGRAVITY_BALANCED_MODEL` | `gemini-4-hydrogen-medium` |
+| `ANTIGRAVITY_FAST_MODEL` | `gemini-4-hydrogen-low` |
 | `ANTIGRAVITY_WORKER_TERMINALS` | `off`; set to `on` on Windows to open a formatted Command Prompt result viewer for every running worker. |
+| `ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES` | 32 MiB; bounds the scheduler's retained fallback output while final stream results are collected incrementally. Primarily useful for tests and diagnostics. |
 | `ANTIGRAVITY_MAX_MEDIA_FILE_MB` | 250 MB per input file. |
 | `ANTIGRAVITY_MAX_MEDIA_TOTAL_MB` | 1024 MB across a request's inputs. |
 | `ANTIGRAVITY_MAX_INLINE_ARTIFACT_MB` | 12 MB for inline artifacts. |
