@@ -45,9 +45,9 @@ const maxWorkers = String(process.env.ANTIGRAVITY_MAX_WORKERS || "auto").toLower
   ? automaticWorkers
   : clampInt(process.env.ANTIGRAVITY_MAX_WORKERS, 1, 32, automaticWorkers);
 const maxTeamAgents = clampInt(process.env.ANTIGRAVITY_MAX_TEAM_AGENTS, 1, 64, 32);
-const defaultModel = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.1-pro-high";
-const balancedModel = process.env.ANTIGRAVITY_BALANCED_MODEL || "gemini-3.8-flash-medium";
-const fastModel = process.env.ANTIGRAVITY_FAST_MODEL || "gemini-3.8-flash-low";
+const defaultModel = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-4-carbon-high";
+const balancedModel = process.env.ANTIGRAVITY_BALANCED_MODEL || "gemini-4-hydrogen-medium";
+const fastModel = process.env.ANTIGRAVITY_FAST_MODEL || "gemini-4-hydrogen-low";
 const terminalConfig = workerTerminalConfig();
 const maxBufferedStdoutBytes = clampInt(process.env.ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES, 1024, 32 * 1024 * 1024, 32 * 1024 * 1024);
 
@@ -1683,7 +1683,7 @@ const commonStartProperties = {
   task: { type: "string", description: "A bounded, self-contained assignment for the worker." },
   context: { type: "string", description: "Relevant constraints or known context." },
   acceptance_criteria: { type: "string", description: "Specific conditions that define a good result." },
-  model: { type: "string", description: "Antigravity model id. Defaults to gemini-3.1-pro-high." },
+  model: { type: "string", description: "Antigravity model id. Defaults to gemini-4-carbon-high." },
   model_policy: { type: "string", enum: ["quality", "balanced", "fast", "custom"], description: "Routing policy. Quality uses Pro High, balanced uses Flash Medium, and fast uses Flash Low unless configured otherwise." },
   effort: { type: "string", enum: ["low", "medium", "high"], description: "Reasoning effort. Defaults to high." },
   timeout_minutes: { type: "integer", minimum: 1, maximum: 120 },
